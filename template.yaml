@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  fcg-notifications-lambda
+  AWS SAM Template para o servico Serverless de Notificacoes do FCG (FIAP Cloud Games)
+
+Globals:
+  Function:
+    Timeout: 15
+    MemorySize: 256
+    Runtime: dotnet8
+    Tracing: Active
+    Environment:
+      Variables:
+        LOG_LEVEL: Information
+
+Resources:
+  # Dead Letter Queue (DLQ) para armazenar mensagens com falha persistente
+  NotificationsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fcg-notifications-dlq
+      MessageRetentionPeriod: 1209600 # 14 dias
+
+  # Fila principal SQS de Notificacoes
+  NotificationsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fcg-notifications-queue
+      VisibilityTimeout: 90 # 6x o timeout da Lambda (15s * 6)
+      MessageRetentionPeriod: 345600 # 4 dias
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NotificationsDLQ.Arn
+        maxReceiveCount: 3
+
+  # Funcao AWS Lambda acionada por eventos na fila SQS
+  NotificationsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: fcg-notifications-function
+      CodeUri: ./src/FCG.Notifications.Function/
+      Handler: FCG.Notifications.Function::FCG.Notifications.Function.Function::FunctionHandler
+      Description: Processa notificacoes de compras e pagamentos aprovados do FCG via eventos SQS.
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - SQSPollerPolicy:
+            QueueName: !GetAtt NotificationsQueue.QueueName
+      Events:
+        SQSEventTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt NotificationsQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            Enabled: true
+
+Outputs:
+  NotificationsQueueUrl:
+    Description: URL da fila SQS de Notificacoes (informar no appsettings / variavel de ambiente da API)
+    Value: !Ref NotificationsQueue
+    Export:
+      Name: FCG-NotificationsQueueUrl
+
+  NotificationsQueueArn:
+    Description: ARN da fila SQS de Notificacoes
+    Value: !GetAtt NotificationsQueue.Arn
+    Export:
+      Name: FCG-NotificationsQueueArn
+
+  NotificationsDLQUrl:
+    Description: URL da Dead Letter Queue (DLQ)
+    Value: !Ref NotificationsDLQ
+
+  NotificationsFunctionArn:
+    Description: ARN da funcao AWS Lambda de Notificacoes
+    Value: !GetAtt NotificationsFunction.Arn

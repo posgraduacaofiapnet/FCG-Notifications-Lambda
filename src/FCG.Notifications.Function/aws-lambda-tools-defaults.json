@@ -1,0 +1,13 @@
+{
+  "Information": [
+    "This file provides default values for the deployment wizard inside Visual Studio and the dotnet lambda commands."
+  ],
+  "profile": "default",
+  "region": "us-east-1",
+  "configuration": "Release",
+  "framework": "net10.0",
+  "function-runtime": "dotnet8",
+  "function-memory-size": 256,
+  "function-timeout": 15,
+  "function-handler": "FCG.Notifications.Function::FCG.Notifications.Function.Function::FunctionHandler"
+}
