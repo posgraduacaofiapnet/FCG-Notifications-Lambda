@@ -18,20 +18,22 @@ Nesta **Fase 3**, o serviço foi refatorado para uma **Função Serverless (AWS 
 ## 🏗️ 2. Arquitetura do Trigger
 
 ```text
-+-----------------------+           +--------------------------+
-|  FCG API / Monolito   |           |  Amazon SQS              |
-|  (OrderService)       | --------> |  (fcg-notifications-     |
-|  Aprova Pagamento     |           |   queue)                 |
-+-----------------------+           +--------------------------+
-                                                 |
-                                                 | (Trigger automático)
-                                                 v
-+-----------------------+           +--------------------------+
-|  CloudWatch Logs      |           |  AWS Lambda (.NET 10)    |
-|  Log estruturado JSON | <-------- |  (fcg-notifications-     |
-|  (notification_sent)  |           |   function)              |
-+-----------------------+           +--------------------------+
++--------------------------------+           +--------------------------+
+|  CatalogAPI                    |           |  Amazon SQS              |
+|  POST /api/library/purchase    | --------> |  (fcg-notifications-     |
+|  (nao existe POST /api/orders) |           |   queue)                 |
++--------------------------------+           +--------------------------+
+                                                         |
+                                                         | (Trigger automático)
+                                                         v
++--------------------------------+           +--------------------------+
+|  CloudWatch Logs               |           |  AWS Lambda (.NET 10)    |
+|  Log JSON notification_sent    | <-------- |  (fcg-notifications-     |
+|  channel: email-simulated      |           |   function)              |
++--------------------------------+           +--------------------------+
 ```
+
+> **Atenção:** o guia da Fase 1 (monolito) citava `POST /api/orders` e `POST /api/orders/{id}/pay`. Na arquitetura atual de microserviços **esses endpoints não existem**. A compra é `POST /api/library/purchase` na CatalogAPI (`http://localhost:5102`). A resposta `202 Accepted` devolve `{ id, status }` e um header `Location` no formato `/api/orders/{id}` — isso é só o identificador do pedido criado, não uma rota HTTP para chamar.
 
 ---
 
@@ -98,13 +100,54 @@ NotificationsQueueUrl: https://sqs.us-east-1.amazonaws.com/123456789012/fcg-noti
 
 ## 🧪 7. Testes e Validação em Nuvem
 
-### 7.1. Acompanhamento de Logs em Tempo Real
+### 7.1. Fluxo real de compra (recomendado para o vídeo)
+
+A CatalogAPI publica a mensagem `OrderPaid` na SQS no mesmo momento em que recebe a compra. Não chame `/api/orders`.
+
+1. Suba os microserviços com as credenciais AWS (a CatalogAPI precisa publicar na fila):
+
+```bash
+cd FCG-Orchestration
+copy .env.example .env
+# Preencha AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY no .env
+docker compose up --build
+```
+
+2. Acompanhe a Lambda em outro terminal:
+
 ```bash
 sam logs -n NotificationsFunction --tail
 ```
-*(Ou acesse pelo Console AWS: **CloudWatch** → **Log groups** → `/aws/lambda/fcg-notifications-function`)*.
+
+*(Ou Console AWS: **CloudWatch** → **Log groups** → `/aws/lambda/fcg-notifications-function`)*.
+
+3. Execute o fluxo na CatalogAPI (Bruno em `FCG-Orchestration/bruno` ou o script `test-apis.ps1`):
+
+```http
+POST http://localhost:5101/api/auth/register
+POST http://localhost:5101/api/auth/login          # usuario comum → userToken, userId
+POST http://localhost:5101/api/auth/login          # admin@fcg.com / AdminSenha@123
+POST http://localhost:5102/api/games               # Bearer adminToken
+POST http://localhost:5102/api/library/purchase    # Bearer userToken
+```
+
+Payload da compra:
+
+```json
+{
+  "userId": "<guid-do-usuario>",
+  "gameId": "<guid-do-jogo>"
+}
+```
+
+4. A CatalogAPI deve responder `202 Accepted` com `{ "id": "<orderId>", "status": "Pending" }` e gravar no log `OrderPaid enviado para SQS`.
+5. Em alguns segundos a Lambda processa a fila e registra o e-mail simulado (`event: notification_sent`, `channel: email-simulated`).
+6. Depois de ~3s, `GET /api/library/{userId}` confirma o jogo na biblioteca (fluxo RabbitMQ/PaymentsAPI).
 
 ### 7.2. Envio de Mensagem de Teste via AWS CLI
+
+Use isto só para isolar a Lambda, sem passar pela API:
+
 ```bash
 aws sqs send-message \
   --queue-url "<COLE_A_URL_DA_FILA_AQUI>" \
@@ -152,4 +195,4 @@ A função será acionada e o log estruturado JSON será registrado:
 - [x] **Dead Letter Queue (DLQ)** e tratamento de mensagens malformadas implementados.
 - [x] **Suíte de testes unitários automatizados** com xUnit e FluentAssertions.
 - [x] **Documentação completa de deploy e operação**.
-# FCG-Notifications-Lambda
+- [x] **Compra via `POST /api/library/purchase`** (CatalogAPI) publica `OrderPaid` na SQS e aciona a Lambda.
