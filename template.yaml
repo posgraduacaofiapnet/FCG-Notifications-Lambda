@@ -13,8 +13,25 @@ Globals:
     Environment:
       Variables:
         LOG_LEVEL: Information
+        IDEMPOTENCY_TABLE_NAME: !Ref NotificationIdempotencyTable
+        IDEMPOTENCY_RETENTION_DAYS: 7
 
 Resources:
+  NotificationIdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fcg-notification-idempotency
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: EventId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: EventId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ExpiresAt
+        Enabled: true
+
   # Dead Letter Queue (DLQ) para armazenar mensagens com falha persistente
   NotificationsDLQ:
     Type: AWS::SQS::Queue
@@ -40,11 +57,13 @@ Resources:
       FunctionName: fcg-notifications-function
       CodeUri: ./src/FCG.Notifications.Function/
       Handler: FCG.Notifications.Function::FCG.Notifications.Function.Function::FunctionHandler
-      Description: Processa notificacoes de compras e pagamentos aprovados do FCG via eventos SQS.
+      Description: Processa UserCreated, OrderPlaced e PaymentProcessed do FCG via eventos SQS.
       Policies:
         - AWSLambdaBasicExecutionRole
         - SQSPollerPolicy:
             QueueName: !GetAtt NotificationsQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NotificationIdempotencyTable
       Events:
         SQSEventTrigger:
           Type: SQS
@@ -52,11 +71,13 @@ Resources:
             Queue: !GetAtt NotificationsQueue.Arn
             BatchSize: 10
             MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
             Enabled: true
 
 Outputs:
   NotificationsQueueUrl:
-    Description: URL da fila SQS de Notificacoes (informar no appsettings / variavel de ambiente da API)
+    Description: URL da fila SQS de Notificacoes (configurar no FCG-Outbox-Processor)
     Value: !Ref NotificationsQueue
     Export:
       Name: FCG-NotificationsQueueUrl
