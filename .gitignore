@@ -6,3 +6,4 @@ obj/
 *.user
 .aws-sam/
 samconfig.toml
+TestResults/

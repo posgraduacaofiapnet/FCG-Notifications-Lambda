@@ -80,6 +80,103 @@ public sealed class FunctionTests
             .Should().Contain("notification_duplicate_ignored");
     }
 
+    [Fact]
+    public async Task FunctionHandler_WithBusyEvent_ReturnsPartialBatchFailure()
+    {
+        var context = new TestLambdaContext();
+        var store = new ControlledIdempotencyStore { AcquireResult = IdempotencyAcquireResult.Busy };
+        var sut = CreateFunction(store);
+
+        var response = await sut.FunctionHandler(
+            CreateEvent("busy", SerializeEnvelope("UserCreated", NewUserCreatedPayload())),
+            context);
+
+        response.BatchItemFailures.Should().ContainSingle()
+            .Which.ItemIdentifier.Should().Be("busy");
+    }
+
+    [Fact]
+    public async Task FunctionHandler_WhenDispatchFails_ReleasesIdempotencyLease()
+    {
+        var context = new TestLambdaContext();
+        var store = new ControlledIdempotencyStore();
+        var sut = CreateFunction(store);
+
+        var response = await sut.FunctionHandler(
+            CreateEvent("invalid-payload", SerializeEnvelope("UserCreated", new { })),
+            context);
+
+        response.BatchItemFailures.Should().ContainSingle();
+        store.Released.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task FunctionHandler_WhenReleaseAlsoFails_LogsReleaseFailure()
+    {
+        var context = new TestLambdaContext();
+        var store = new ControlledIdempotencyStore { ReleaseException = new InvalidOperationException("DynamoDB down") };
+        var sut = CreateFunction(store);
+
+        var response = await sut.FunctionHandler(
+            CreateEvent("invalid-payload", SerializeEnvelope("UserCreated", new { })),
+            context);
+
+        response.BatchItemFailures.Should().ContainSingle();
+        ((TestLambdaLogger)context.Logger).Buffer.ToString()
+            .Should().Contain("notification_idempotency_release_failed");
+    }
+
+    [Fact]
+    public async Task FunctionHandler_WithEmptyBatch_CompletesWithoutFailures()
+    {
+        var response = await CreateFunction(new ControlledIdempotencyStore())
+            .FunctionHandler(new SQSEvent(), new TestLambdaContext());
+
+        response.BatchItemFailures.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task FunctionHandler_WithEmptyBody_ReturnsPartialBatchFailure()
+    {
+        var response = await CreateFunction(new ControlledIdempotencyStore())
+            .FunctionHandler(CreateEvent("empty", ""), new TestLambdaContext());
+
+        response.BatchItemFailures.Should().ContainSingle()
+            .Which.ItemIdentifier.Should().Be("empty");
+    }
+
+    [Fact]
+    public void DefaultConstructor_WithoutTableName_ThrowsConfigurationError()
+    {
+        using var environment = new EnvironmentScope();
+        Environment.SetEnvironmentVariable("IDEMPOTENCY_TABLE_NAME", null);
+
+        var action = () => new Function();
+
+        action.Should().Throw<InvalidOperationException>()
+            .WithMessage("IDEMPOTENCY_TABLE_NAME is required.");
+    }
+
+    [Theory]
+    [InlineData(null, "invalid")]
+    [InlineData("http://localhost:4566", "5")]
+    public void DefaultConstructor_WithConfiguration_CreatesFunction(
+        string? serviceUrl,
+        string retentionDays)
+    {
+        using var environment = new EnvironmentScope();
+        Environment.SetEnvironmentVariable("IDEMPOTENCY_TABLE_NAME", "notifications-test");
+        Environment.SetEnvironmentVariable("AWS_REGION", "us-east-1");
+        Environment.SetEnvironmentVariable("AWS_ACCESS_KEY_ID", "test");
+        Environment.SetEnvironmentVariable("AWS_SECRET_ACCESS_KEY", "test");
+        Environment.SetEnvironmentVariable("DYNAMODB_SERVICE_URL", serviceUrl);
+        Environment.SetEnvironmentVariable("IDEMPOTENCY_RETENTION_DAYS", retentionDays);
+
+        var sut = new Function();
+
+        sut.Should().NotBeNull();
+    }
+
     public static IEnumerable<object[]> ValidEvents()
     {
         yield return ["UserCreated", NewUserCreatedPayload(), "welcome_email_sent"];
@@ -106,6 +203,14 @@ public sealed class FunctionTests
         ]
     };
 
+    private static string SerializeEnvelope(string eventType, object payload) => JsonSerializer.Serialize(new
+    {
+        id = Guid.NewGuid(),
+        eventType,
+        createdAt = DateTimeOffset.UtcNow,
+        payload
+    }, JsonOptions);
+
     private static object NewUserCreatedPayload() => new
     {
         userId = Guid.NewGuid(),
@@ -113,6 +218,30 @@ public sealed class FunctionTests
         email = "ada@example.com",
         createdAt = DateTimeOffset.UtcNow
     };
+
+    private sealed class EnvironmentScope : IDisposable
+    {
+        private static readonly string[] VariableNames =
+        [
+            "IDEMPOTENCY_TABLE_NAME",
+            "AWS_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "DYNAMODB_SERVICE_URL",
+            "IDEMPOTENCY_RETENTION_DAYS"
+        ];
+
+        private readonly Dictionary<string, string?> _values = VariableNames
+            .ToDictionary(name => name, Environment.GetEnvironmentVariable);
+
+        public void Dispose()
+        {
+            foreach (var (name, value) in _values)
+            {
+                Environment.SetEnvironmentVariable(name, value);
+            }
+        }
+    }
 
     private static object NewOrderPlacedPayload() => new
     {
@@ -167,6 +296,26 @@ public sealed class FunctionTests
         {
             Processing.Remove(eventId);
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ControlledIdempotencyStore : INotificationIdempotencyStore
+    {
+        public IdempotencyAcquireResult AcquireResult { get; init; } = IdempotencyAcquireResult.Acquired;
+        public Exception? ReleaseException { get; init; }
+        public List<Guid> Released { get; } = [];
+
+        public Task<IdempotencyAcquireResult> TryAcquireAsync(Guid eventId, CancellationToken cancellationToken) =>
+            Task.FromResult(AcquireResult);
+
+        public Task MarkCompletedAsync(Guid eventId, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task ReleaseAsync(Guid eventId, CancellationToken cancellationToken)
+        {
+            Released.Add(eventId);
+            return ReleaseException is null
+                ? Task.CompletedTask
+                : Task.FromException(ReleaseException);
         }
     }
 }

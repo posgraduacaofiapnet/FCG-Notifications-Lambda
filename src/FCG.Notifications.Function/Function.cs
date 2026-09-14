@@ -132,13 +132,20 @@ public sealed class Function
         var tableName = Environment.GetEnvironmentVariable("IDEMPOTENCY_TABLE_NAME")
             ?? throw new InvalidOperationException("IDEMPOTENCY_TABLE_NAME is required.");
         var regionName = Environment.GetEnvironmentVariable("AWS_REGION") ?? "us-east-1";
+        var serviceUrl = Environment.GetEnvironmentVariable("DYNAMODB_SERVICE_URL");
         var retentionDays = int.TryParse(
             Environment.GetEnvironmentVariable("IDEMPOTENCY_RETENTION_DAYS"),
             out var configuredRetentionDays)
             ? configuredRetentionDays
             : 7;
 
-        var client = new AmazonDynamoDBClient(RegionEndpoint.GetBySystemName(regionName));
+        var client = string.IsNullOrWhiteSpace(serviceUrl)
+            ? new AmazonDynamoDBClient(RegionEndpoint.GetBySystemName(regionName))
+            : new AmazonDynamoDBClient(new AmazonDynamoDBConfig
+            {
+                ServiceURL = serviceUrl,
+                AuthenticationRegion = regionName
+            });
         return new DynamoDbNotificationIdempotencyStore(client, tableName, TimeSpan.FromDays(retentionDays));
     }
 
